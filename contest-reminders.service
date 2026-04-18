@@ -1,0 +1,12 @@
+[Unit]
+Description=Run contest reminder sync scripts
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/kian/contest-reminders
+ExecStart=/home/kian/contest-reminders/run_contest_reminders.sh
+
+[Install]
+WantedBy=default.target
