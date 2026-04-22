@@ -327,10 +327,12 @@ def contest_reason(
     divisions = extract_divisions(str(contest["name"]))
     if not divisions:
         return False, "skipped: no supported division marker in contest name"
-    if divisions.issubset(allowed_divisions):
+
+    eligible_divisions = divisions & allowed_divisions
+    if eligible_divisions:
         return (
             True,
-            f"eligible: rating {USER_RATING} qualifies for {format_division_short(divisions)}",
+            f"eligible: rating {USER_RATING} qualifies for {format_division_short(eligible_divisions)}",
         )
     return (
         False,
