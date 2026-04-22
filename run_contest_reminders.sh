@@ -4,6 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 LOG_FILE="$SCRIPT_DIR/contest-reminders.log"
+FAILED_SCRIPTS=()
 
 timestamp() {
   date '+%Y-%m-%d %H:%M:%S'
@@ -41,13 +42,22 @@ run_script() {
   log_script_output "$script_name" "$output"
 
   if (( status != 0 )); then
-    log_message "Run failed while executing $script_name"
-    exit "$status"
+    log_message "Run warning: $script_name failed with exit status $status"
+    FAILED_SCRIPTS+=("$script_name")
   fi
+}
+
+log_summary() {
+  if (( ${#FAILED_SCRIPTS[@]} == 0 )); then
+    log_message "Run finished successfully"
+    return
+  fi
+
+  log_message "Run finished with warnings; failed sources: ${FAILED_SCRIPTS[*]}"
 }
 
 log_message "Run started"
 run_script "ctf" "$SCRIPT_DIR/ctf.py"
 run_script "codeforces" "$SCRIPT_DIR/codeforces.py"
 run_script "dmoj" "$SCRIPT_DIR/dmoj.py"
-log_message "Run finished successfully"
+log_summary

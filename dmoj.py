@@ -1,5 +1,6 @@
 import json
 import os
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,8 +37,20 @@ def require_env(name: str) -> str:
 
 def fetch_json(url: str, headers: dict[str, str] | None = None) -> object:
     request = urllib.request.Request(url, headers=headers or {})
-    with urllib.request.urlopen(request) as response:
-        return json.load(response)
+    try:
+        with urllib.request.urlopen(request) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as exc:
+        mitigation = exc.headers.get("cf-mitigated") if exc.headers else None
+        if exc.code == 403 and mitigation == "challenge":
+            raise RuntimeError(
+                "DMOJ contests API is blocked by a Cloudflare challenge"
+            ) from exc
+        raise RuntimeError(
+            f"DMOJ contests API request failed with HTTP {exc.code}"
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"DMOJ contests API request failed: {exc.reason}") from exc
 
 
 def post_json(
@@ -377,7 +390,12 @@ def main() -> None:
         os.environ.get("LINEAR_BACKLOG_STATE_NAME", DEFAULT_BACKLOG_STATE_NAME),
     )
 
-    contests = fetch_contests()
+    try:
+        contests = fetch_contests()
+    except RuntimeError as exc:
+        print(f"Unable to fetch DMOJ contests: {exc}")
+        raise SystemExit(1) from None
+
     if not contests:
         print("No startable DMOJ contests found.")
         return
