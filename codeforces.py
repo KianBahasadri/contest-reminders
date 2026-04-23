@@ -157,6 +157,7 @@ def find_issue(api_key: str, title: str, project_id: str) -> dict[str, object] |
             nodes {
               id
               identifier
+              title
               dueDate
               project {
                 id
@@ -174,22 +175,6 @@ def find_issue(api_key: str, title: str, project_id: str) -> dict[str, object] |
             return issue
 
     return None
-
-
-def update_issue_due_date(api_key: str, issue_id: str, due_date: str) -> None:
-    data = linear_graphql(
-        api_key,
-        """
-        mutation UpdateIssueDueDate($id: String!, $input: IssueUpdateInput!) {
-          issueUpdate(id: $id, input: $input) {
-            success
-          }
-        }
-        """,
-        {"id": issue_id, "input": {"dueDate": due_date}},
-    )
-    if not data["issueUpdate"]["success"]:
-        raise RuntimeError(f"Linear failed to update due date for issue {issue_id!r}")
 
 
 def update_issue_fields(
@@ -303,7 +288,9 @@ def build_issue_title(contest: dict[str, object], start_time: datetime) -> str:
     round_label = build_round_label(contest_name)
     if round_label == contest_name and not re.search(r"Round \d+", contest_name):
         round_label = f"Codeforces #{contest['id']}"
-    return f"CF {round_label} {format_division_short(divisions)} - {format_time(start_time)}"
+    return (
+        f"{round_label} {format_division_short(divisions)} - {format_time(start_time)}"
+    )
 
 
 def build_issue_description(contest: dict[str, object], start_time: datetime) -> str:
@@ -338,23 +325,6 @@ def contest_reason(
         False,
         f"skipped: rating {USER_RATING} does not qualify for {format_division_short(divisions)}",
     )
-
-
-def build_legacy_issue_titles(
-    contest: dict[str, object], start_time: datetime
-) -> list[str]:
-    divisions = extract_divisions(str(contest["name"]))
-    division_short = format_division_short(divisions)
-    contest_name = str(contest["name"])
-    contest_id = contest["id"]
-    time_text = format_time(start_time)
-    return [
-        f"codeforces {contest_id} {division_short} - {time_text}",
-        f"CF {contest_name} {division_short} - {time_text}",
-        f"CF Codeforces Round (Div. 1) {division_short} - {time_text}",
-        f"CF Codeforces Round (Div. 2) {division_short} - {time_text}",
-        f"CF Codeforces Round (Div. 1 + Div. 2) {division_short} - {time_text}",
-    ]
 
 
 def fetch_contests() -> list[dict[str, object]]:
@@ -398,11 +368,6 @@ def sync_contest(
 
     title = build_issue_title(contest, start_time)
     existing_issue = find_issue(api_key, title, project_id)
-    if not existing_issue:
-        for legacy_title in build_legacy_issue_titles(contest, start_time):
-            existing_issue = find_issue(api_key, legacy_title, project_id)
-            if existing_issue:
-                break
 
     if existing_issue:
         updates: list[str] = []

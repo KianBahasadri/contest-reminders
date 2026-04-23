@@ -172,10 +172,6 @@ def build_issue_title(event: dict[str, object], start_time: datetime) -> str:
     return f"CTF:{weight:.2f} {event['title']} - {format_time(start_time)}"
 
 
-def build_legacy_issue_title(event: dict[str, object], start_time: datetime) -> str:
-    return f"CTF {event['title']} - {format_time(start_time)}"
-
-
 def fetch_events() -> list[dict[str, object]]:
     events = fetch_json(CTFTIME_EVENTS_URL, headers={"User-Agent": USER_AGENT})
     if not isinstance(events, list):
@@ -279,22 +275,6 @@ def find_issue(api_key: str, title: str, project_id: str) -> dict[str, object] |
     return None
 
 
-def update_issue_due_date(api_key: str, issue_id: str, due_date: str) -> None:
-    data = linear_graphql(
-        api_key,
-        """
-        mutation UpdateIssueDueDate($id: String!, $input: IssueUpdateInput!) {
-          issueUpdate(id: $id, input: $input) {
-            success
-          }
-        }
-        """,
-        {"id": issue_id, "input": {"dueDate": due_date}},
-    )
-    if not data["issueUpdate"]["success"]:
-        raise RuntimeError(f"Linear failed to update due date for issue {issue_id!r}")
-
-
 def update_issue_fields(
     api_key: str,
     issue_id: str,
@@ -375,12 +355,9 @@ def sync_event(
 ) -> str:
     start_time = datetime.fromisoformat(str(event["start"])).astimezone(TARGET_TIMEZONE)
     title = build_issue_title(event, start_time)
-    legacy_title = build_legacy_issue_title(event, start_time)
     due_date = format_due_date(start_time)
 
     existing_issue = find_issue(api_key, title, project_id)
-    if not existing_issue and legacy_title != title:
-        existing_issue = find_issue(api_key, legacy_title, project_id)
 
     if existing_issue:
         updates: list[str] = []
