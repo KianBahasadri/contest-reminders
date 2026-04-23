@@ -59,5 +59,5 @@ log_summary() {
 log_message "Run started"
 run_script "ctf" "$SCRIPT_DIR/ctf.py"
 run_script "codeforces" "$SCRIPT_DIR/codeforces.py"
-run_script "dmoj" "$SCRIPT_DIR/dmoj.py"
+#run_script "dmoj" "$SCRIPT_DIR/dmoj.py"
 log_summary
