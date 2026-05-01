@@ -1,6 +1,8 @@
 import json
 import os
 import re
+import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,6 +16,9 @@ USER_AGENT = "Mozilla/5.0"
 DEFAULT_PROJECT_NAME = "Competitions"
 DEFAULT_BACKLOG_STATE_NAME = "Backlog"
 USER_RATING = 393
+REQUEST_TIMEOUT_SECONDS = 20
+FETCH_ATTEMPTS = 3
+FETCH_RETRY_DELAY_SECONDS = 2
 
 
 def load_dotenv(env_path: Path) -> None:
@@ -37,9 +42,36 @@ def require_env(name: str) -> str:
 
 
 def fetch_json(url: str, headers: dict[str, str] | None = None) -> object:
-    request = urllib.request.Request(url, headers=headers or {})
-    with urllib.request.urlopen(request) as response:
-        return json.load(response)
+    last_error: Exception | None = None
+    for attempt in range(1, FETCH_ATTEMPTS + 1):
+        request = urllib.request.Request(url, headers=headers or {})
+        try:
+            with urllib.request.urlopen(
+                request, timeout=REQUEST_TIMEOUT_SECONDS
+            ) as response:
+                return json.load(response)
+        except json.JSONDecodeError as exc:
+            last_error = exc
+            message = "Codeforces contests API returned invalid JSON"
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            message = f"Codeforces contests API request failed with HTTP {exc.code}"
+            if exc.code not in {429, 500, 502, 503, 504}:
+                raise RuntimeError(message) from exc
+        except urllib.error.URLError as exc:
+            last_error = exc
+            message = f"Codeforces contests API request failed: {exc.reason}"
+        except TimeoutError as exc:
+            last_error = exc
+            message = "Codeforces contests API request timed out"
+
+        if attempt < FETCH_ATTEMPTS:
+            time.sleep(FETCH_RETRY_DELAY_SECONDS)
+            continue
+
+        raise RuntimeError(message) from last_error
+
+    raise RuntimeError("Codeforces contests API request failed")
 
 
 def post_json(
@@ -419,7 +451,13 @@ def main() -> None:
     )
     allowed_divisions = allowed_divisions_for_rating(USER_RATING)
 
-    for contest in fetch_contests():
+    try:
+        contests = fetch_contests()
+    except RuntimeError as exc:
+        print(f"Unable to fetch Codeforces contests: {exc}")
+        raise SystemExit(1) from None
+
+    for contest in contests:
         print(
             sync_contest(
                 api_key,
