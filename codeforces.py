@@ -307,7 +307,11 @@ def build_round_label(name: str) -> str:
     if match:
         return match.group(0)
 
-    match = re.search(r"Codeforces Round(?: \(Div\.[^)]+\))?", name)
+    match = re.search(r"Codeforces Round (\d+)", name)
+    if match:
+        return f"Codeforces {match.group(1)}"
+
+    match = re.search(r"Codeforces Round(?: \d+)?(?: \(Div\.[^)]+\))?", name)
     if match:
         return match.group(0)
 
