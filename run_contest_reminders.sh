@@ -5,16 +5,16 @@ set -euo pipefail
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 LOG_FILE="$SCRIPT_DIR/contest-reminders.log"
 FAILED_SCRIPTS=()
-DEFAULT_ENABLED_SCRIPTS="ctf,codeforces"
 
 declare -A SCRIPT_PATHS=(
   [ctf]="$SCRIPT_DIR/ctf.py"
   [codeforces]="$SCRIPT_DIR/codeforces.py"
+  [atcoder]="$SCRIPT_DIR/atcoder.py"
   [clist_dmoj]="$SCRIPT_DIR/clist_dmoj.py"
   [dmoj]="$SCRIPT_DIR/dmoj.py"
 )
 
-SCRIPT_ORDER=(ctf codeforces clist_dmoj dmoj)
+SCRIPT_ORDER=(ctf codeforces atcoder clist_dmoj dmoj)
 
 timestamp() {
   date '+%Y-%m-%d %H:%M:%S'
@@ -75,10 +75,26 @@ load_env() {
 
 script_is_enabled() {
   local script_name="$1"
-  local enabled_scripts="${CONTEST_REMINDER_SCRIPTS:-$DEFAULT_ENABLED_SCRIPTS}"
+  local enabled_scripts="$CONTEST_REMINDER_SCRIPTS"
   local normalized=" ${enabled_scripts//,/ } "
 
   [[ "$normalized" == *" all "* || "$normalized" == *" $script_name "* ]]
+}
+
+require_enabled_scripts() {
+  if [[ -n "${CONTEST_REMINDER_SCRIPTS:-}" ]]; then
+    return
+  fi
+
+  log_message "Run failed: CONTEST_REMINDER_SCRIPTS must be set in .env"
+  exit 1
+}
+
+dry_run_is_enabled() {
+  local value="${CONTEST_REMINDER_DRY_RUN:-}"
+  value="${value,,}"
+
+  [[ "$value" == "1" || "$value" == "true" || "$value" == "yes" || "$value" == "on" ]]
 }
 
 run_script() {
@@ -112,6 +128,10 @@ log_summary() {
 load_env
 
 log_message "Run started"
+require_enabled_scripts
+if dry_run_is_enabled; then
+  log_message "Dry run enabled: Linear creates and updates will be previewed only"
+fi
 for script_name in "${SCRIPT_ORDER[@]}"; do
   if script_is_enabled "$script_name"; then
     run_script "$script_name" "${SCRIPT_PATHS[$script_name]}"

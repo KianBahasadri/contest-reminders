@@ -37,6 +37,10 @@ def require_env(name: str) -> str:
     raise RuntimeError(f"Missing required environment variable: {name}")
 
 
+def env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def fetch_json(url: str, params: dict[str, object] | None = None) -> object:
     if params:
         encoded_params = urllib.parse.urlencode(params, doseq=True)
@@ -337,6 +341,7 @@ def sync_contest(
     project_id: str,
     backlog_state_id: str | None,
     contest: dict[str, object],
+    dry_run: bool,
 ) -> str:
     start_time = parse_contest_time(contest["start"])
     title = build_issue_title(contest, start_time)
@@ -352,6 +357,9 @@ def sync_contest(
             updates.append("due date")
 
         if updates:
+            if dry_run:
+                return f"{prefix} [dry run: would update {existing_issue['identifier']} {' and '.join(updates)}]"
+
             update_issue_fields(
                 api_key,
                 str(existing_issue["id"]),
@@ -363,6 +371,9 @@ def sync_contest(
             return f"{prefix} [updated {existing_issue['identifier']} {' and '.join(updates)}]"
 
         return f"{prefix} [already existed as {existing_issue['identifier']}]"
+
+    if dry_run:
+        return f"{prefix} [dry run: would create {title!r}]"
 
     issue_identifier = create_issue(
         api_key,
@@ -392,6 +403,7 @@ def main() -> None:
         team_id,
         os.environ.get("LINEAR_BACKLOG_STATE_NAME", DEFAULT_BACKLOG_STATE_NAME),
     )
+    dry_run = env_truthy("CONTEST_REMINDER_DRY_RUN")
 
     try:
         contests = fetch_contests()
@@ -404,7 +416,9 @@ def main() -> None:
         return
 
     for contest in contests:
-        print(sync_contest(api_key, team_id, project_id, backlog_state_id, contest))
+        print(
+            sync_contest(api_key, team_id, project_id, backlog_state_id, contest, dry_run)
+        )
 
 
 if __name__ == "__main__":

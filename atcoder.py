@@ -5,17 +5,17 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 
-CODEFORCES_CONTESTS_URL = "https://codeforces.com/api/contest.list?gym=false"
+ATCODER_CONTESTS_URL = "https://atcoder.jp/contests"
 LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql"
 TARGET_TIMEZONE = ZoneInfo("America/New_York")
 USER_AGENT = "Mozilla/5.0"
 DEFAULT_PROJECT_NAME = "Competitions"
 DEFAULT_BACKLOG_STATE_NAME = "Backlog"
-USER_RATING = 393
 REQUEST_TIMEOUT_SECONDS = 20
 FETCH_ATTEMPTS = 3
 FETCH_RETRY_DELAY_SECONDS = 2
@@ -45,7 +45,7 @@ def env_truthy(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def fetch_json(url: str, headers: dict[str, str] | None = None) -> object:
+def fetch_text(url: str, headers: dict[str, str] | None = None) -> str:
     last_error: Exception | None = None
     for attempt in range(1, FETCH_ATTEMPTS + 1):
         request = urllib.request.Request(url, headers=headers or {})
@@ -53,21 +53,19 @@ def fetch_json(url: str, headers: dict[str, str] | None = None) -> object:
             with urllib.request.urlopen(
                 request, timeout=REQUEST_TIMEOUT_SECONDS
             ) as response:
-                return json.load(response)
-        except json.JSONDecodeError as exc:
-            last_error = exc
-            message = "Codeforces contests API returned invalid JSON"
+                charset = response.headers.get_content_charset() or "utf-8"
+                return response.read().decode(charset, errors="replace")
         except urllib.error.HTTPError as exc:
             last_error = exc
-            message = f"Codeforces contests API request failed with HTTP {exc.code}"
+            message = f"AtCoder contests page request failed with HTTP {exc.code}"
             if exc.code not in {429, 500, 502, 503, 504}:
                 raise RuntimeError(message) from exc
         except urllib.error.URLError as exc:
             last_error = exc
-            message = f"Codeforces contests API request failed: {exc.reason}"
+            message = f"AtCoder contests page request failed: {exc.reason}"
         except TimeoutError as exc:
             last_error = exc
-            message = "Codeforces contests API request timed out"
+            message = "AtCoder contests page request timed out"
 
         if attempt < FETCH_ATTEMPTS:
             time.sleep(FETCH_RETRY_DELAY_SECONDS)
@@ -75,7 +73,7 @@ def fetch_json(url: str, headers: dict[str, str] | None = None) -> object:
 
         raise RuntimeError(message) from last_error
 
-    raise RuntimeError("Codeforces contests API request failed")
+    raise RuntimeError("AtCoder contests page request failed")
 
 
 def post_json(
@@ -115,6 +113,10 @@ def linear_graphql(
     return data
 
 
+def normalize_whitespace(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def format_time(dt: datetime) -> str:
     return dt.strftime("%-I:%M%p").replace("AM", "am").replace("PM", "pm")
 
@@ -125,6 +127,115 @@ def format_date(dt: datetime) -> str:
 
 def format_due_date(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d")
+
+
+def parse_atcoder_time(value: str) -> datetime:
+    return datetime.strptime(value, "%Y-%m-%d %H:%M:%S%z").astimezone(TARGET_TIMEZONE)
+
+
+class UpcomingContestParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.contests: list[dict[str, str]] = []
+        self.in_row = False
+        self.in_cell = False
+        self.current_cells: list[str] = []
+        self.current_text: list[str] = []
+        self.current_href = ""
+        self.current_link_text: list[str] = []
+        self.in_contest_link = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attrs_dict = dict(attrs)
+        if tag == "tr":
+            self.in_row = True
+            self.current_cells = []
+            return
+
+        if self.in_row and tag == "td":
+            self.in_cell = True
+            self.current_text = []
+            self.current_href = ""
+            self.current_link_text = []
+            self.in_contest_link = False
+            return
+
+        if self.in_cell and tag == "a":
+            href = attrs_dict.get("href") or ""
+            if href.startswith("/contests/"):
+                self.current_href = href
+                self.in_contest_link = True
+
+    def handle_data(self, data: str) -> None:
+        if self.in_cell:
+            self.current_text.append(data)
+            if self.in_contest_link:
+                self.current_link_text.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "a" and self.in_contest_link:
+            self.in_contest_link = False
+            return
+
+        if tag == "td" and self.in_cell:
+            if self.current_href:
+                self.current_cells.append(
+                    normalize_whitespace("".join(self.current_link_text))
+                )
+                self.current_cells.append(self.current_href)
+            else:
+                self.current_cells.append(normalize_whitespace("".join(self.current_text)))
+            self.in_cell = False
+            return
+
+        if tag == "tr" and self.in_row:
+            self.in_row = False
+            if len(self.current_cells) >= 5:
+                self.contests.append(
+                    {
+                        "start": self.current_cells[0],
+                        "name": self.current_cells[1],
+                        "href": self.current_cells[2],
+                        "duration": self.current_cells[3],
+                        "rated_range": self.current_cells[4],
+                    }
+                )
+
+
+def extract_upcoming_section(html: str) -> str:
+    marker = '<div id="contest-table-upcoming">'
+    start = html.find(marker)
+    if start == -1:
+        raise RuntimeError("Could not find AtCoder upcoming contests table")
+
+    tbody_start = html.find("<tbody>", start)
+    tbody_end = html.find("</tbody>", tbody_start)
+    if tbody_start == -1 or tbody_end == -1:
+        raise RuntimeError("Could not find AtCoder upcoming contests rows")
+
+    return html[tbody_start : tbody_end + len("</tbody>")]
+
+
+def contest_class(contest: dict[str, str]) -> str | None:
+    href = contest["href"]
+    name = contest["name"]
+    if re.fullmatch(r"/contests/abc\d+", href) or "AtCoder Beginner Contest" in name:
+        return "ABC"
+    if re.fullmatch(r"/contests/arc\d+", href) or "AtCoder Regular Contest" in name:
+        return "ARC"
+    return None
+
+
+def is_rated(contest: dict[str, str]) -> bool:
+    rated_range = contest["rated_range"].strip()
+    return bool(rated_range and rated_range != "-" and rated_range.lower() != "all")
+
+
+def contest_number(contest: dict[str, str]) -> str:
+    match = re.search(r"/contests/(?:abc|arc)(\d+)", contest["href"])
+    if match:
+        return match.group(1)
+    return contest["name"]
 
 
 def resolve_project_id(api_key: str, project_name: str) -> str:
@@ -282,109 +393,36 @@ def create_issue(
     return str(created["issue"]["identifier"])
 
 
-def extract_divisions(name: str) -> set[int]:
-    normalized = name.lower().replace("division", "div")
-    matches = re.findall(r"div\.?\s*(\d)", normalized)
-    return {int(match) for match in matches}
+def build_issue_title(contest: dict[str, str], start_time: datetime) -> str:
+    atcoder_class = contest_class(contest) or "Contest"
+    return f"AtCoder {atcoder_class} {contest_number(contest)} - {format_time(start_time)}"
 
 
-def allowed_divisions_for_rating(rating: int) -> set[int]:
-    if rating >= 2100:
-        return {1}
-    if rating >= 1900:
-        return {1, 2}
-    if rating >= 1600:
-        return {2}
-    if rating >= 1400:
-        return {2, 3}
-    if rating >= 0:
-        return {2, 3, 4}
-    return set()
-
-
-def format_division_short(divisions: set[int]) -> str:
-    return "D" + "+".join(str(division) for division in sorted(divisions))
-
-
-def build_round_label(name: str) -> str:
-    match = re.search(r"Educational Codeforces Round \d+", name)
-    if match:
-        return match.group(0)
-
-    match = re.search(r"Codeforces Round (\d+)", name)
-    if match:
-        return f"Codeforces {match.group(1)}"
-
-    match = re.search(r"Codeforces Round(?: \d+)?(?: \(Div\.[^)]+\))?", name)
-    if match:
-        return match.group(0)
-
-    return name
-
-
-def build_issue_title(contest: dict[str, object], start_time: datetime) -> str:
-    divisions = extract_divisions(str(contest["name"]))
-    contest_name = str(contest["name"])
-    round_label = build_round_label(contest_name)
-    if round_label == contest_name and not re.search(r"Round \d+", contest_name):
-        round_label = f"Codeforces #{contest['id']}"
-    return (
-        f"{round_label} {format_division_short(divisions)} - {format_time(start_time)}"
-    )
-
-
-def build_issue_description(contest: dict[str, object], start_time: datetime) -> str:
-    duration_seconds = int(contest.get("durationSeconds", 0) or 0)
-    hours = duration_seconds // 3600
-    minutes = (duration_seconds % 3600) // 60
-    duration = f"{hours}h" + (f" {minutes}m" if minutes else "")
+def build_issue_description(contest: dict[str, str], start_time: datetime) -> str:
     return "\n".join(
         [
             f"{contest['name']} starts on {format_date(start_time)} at {format_time(start_time)}.",
-            f"Duration: {duration}",
-            f"Type: {contest.get('type', 'unknown')}",
-            f"URL: https://codeforces.com/contest/{contest['id']}",
+            f"Duration: {contest['duration']}",
+            f"Rated range: {contest['rated_range']}",
+            f"URL: https://atcoder.jp{contest['href']}",
         ]
     )
 
 
-def contest_reason(
-    contest: dict[str, object], allowed_divisions: set[int]
-) -> tuple[bool, str]:
-    divisions = extract_divisions(str(contest["name"]))
-    if not divisions:
-        return False, "skipped: no supported division marker in contest name"
+def fetch_contests() -> list[dict[str, str]]:
+    html = fetch_text(ATCODER_CONTESTS_URL, headers={"User-Agent": USER_AGENT})
+    parser = UpcomingContestParser()
+    parser.feed(extract_upcoming_section(html))
 
-    eligible_divisions = divisions & allowed_divisions
-    if eligible_divisions:
-        return (
-            True,
-            f"eligible: rating {USER_RATING} qualifies for {format_division_short(eligible_divisions)}",
-        )
-    return (
-        False,
-        f"skipped: rating {USER_RATING} does not qualify for {format_division_short(divisions)}",
-    )
-
-
-def fetch_contests() -> list[dict[str, object]]:
-    payload = fetch_json(CODEFORCES_CONTESTS_URL, headers={"User-Agent": USER_AGENT})
-    if not isinstance(payload, dict) or payload.get("status") != "OK":
-        raise RuntimeError("Unexpected Codeforces response")
-
-    contests = payload.get("result")
-    if not isinstance(contests, list):
-        raise RuntimeError("Codeforces returned no contests")
-
-    now = datetime.now(timezone.utc).timestamp()
+    now = datetime.now(timezone.utc)
     upcoming = [
         contest
-        for contest in contests
-        if isinstance(contest, dict)
-        and contest.get("phase") == "BEFORE"
-        and float(contest.get("startTimeSeconds", 0) or 0) > now
+        for contest in parser.contests
+        if contest_class(contest) in {"ABC", "ARC"}
+        and is_rated(contest)
+        and parse_atcoder_time(contest["start"]).astimezone(timezone.utc) > now
     ]
-    upcoming.sort(key=lambda contest: int(contest["startTimeSeconds"]))
+    upcoming.sort(key=lambda contest: parse_atcoder_time(contest["start"]))
     return upcoming
 
 
@@ -393,23 +431,15 @@ def sync_contest(
     team_id: str,
     project_id: str,
     backlog_state_id: str | None,
-    contest: dict[str, object],
-    allowed_divisions: set[int],
+    contest: dict[str, str],
     dry_run: bool,
 ) -> str:
-    start_time = datetime.fromtimestamp(
-        int(contest["startTimeSeconds"]), tz=TARGET_TIMEZONE
-    )
+    start_time = parse_atcoder_time(contest["start"])
+    title = build_issue_title(contest, start_time)
     due_date = format_due_date(start_time)
-    eligible, reason = contest_reason(contest, allowed_divisions)
     prefix = f"{format_date(start_time)}: {contest['name']}"
 
-    if not eligible:
-        return f"{prefix} [{reason}]"
-
-    title = build_issue_title(contest, start_time)
     existing_issue = find_issue(api_key, title, project_id)
-
     if existing_issue:
         updates: list[str] = []
         if existing_issue.get("title") != title:
@@ -419,7 +449,7 @@ def sync_contest(
 
         if updates:
             if dry_run:
-                return f"{prefix} [dry run: would update {existing_issue['identifier']} {' and '.join(updates)}: {reason}]"
+                return f"{prefix} [dry run: would update {existing_issue['identifier']} {' and '.join(updates)}]"
 
             update_issue_fields(
                 api_key,
@@ -429,12 +459,12 @@ def sync_contest(
                 if existing_issue.get("dueDate") != due_date
                 else None,
             )
-            return f"{prefix} [updated {existing_issue['identifier']} {' and '.join(updates)}: {reason}]"
+            return f"{prefix} [updated {existing_issue['identifier']} {' and '.join(updates)}]"
 
-        return f"{prefix} [already existed as {existing_issue['identifier']}: {reason}]"
+        return f"{prefix} [already existed as {existing_issue['identifier']}]"
 
     if dry_run:
-        return f"{prefix} [dry run: would create {title!r}: {reason}]"
+        return f"{prefix} [dry run: would create {title!r}]"
 
     issue_identifier = create_issue(
         api_key,
@@ -445,7 +475,7 @@ def sync_contest(
         build_issue_description(contest, start_time),
         due_date,
     )
-    return f"{prefix} [created {issue_identifier}: {reason}]"
+    return f"{prefix} [created {issue_identifier}]"
 
 
 def main() -> None:
@@ -464,26 +494,21 @@ def main() -> None:
         team_id,
         os.environ.get("LINEAR_BACKLOG_STATE_NAME", DEFAULT_BACKLOG_STATE_NAME),
     )
-    allowed_divisions = allowed_divisions_for_rating(USER_RATING)
     dry_run = env_truthy("CONTEST_REMINDER_DRY_RUN")
 
     try:
         contests = fetch_contests()
     except RuntimeError as exc:
-        print(f"Unable to fetch Codeforces contests: {exc}")
+        print(f"Unable to fetch AtCoder contests: {exc}")
         raise SystemExit(1) from None
+
+    if not contests:
+        print("No rated AtCoder ABC/ARC contests found.")
+        return
 
     for contest in contests:
         print(
-            sync_contest(
-                api_key,
-                team_id,
-                project_id,
-                backlog_state_id,
-                contest,
-                allowed_divisions,
-                dry_run,
-            )
+            sync_contest(api_key, team_id, project_id, backlog_state_id, contest, dry_run)
         )
 
 

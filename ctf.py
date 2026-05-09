@@ -39,6 +39,10 @@ def require_env(name: str) -> str:
     raise RuntimeError(f"Missing required environment variable: {name}")
 
 
+def env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def fetch_json(url: str, headers: dict[str, str] | None = None) -> object:
     request = urllib.request.Request(url, headers=headers or {})
     with urllib.request.urlopen(request) as response:
@@ -352,6 +356,7 @@ def sync_event(
     project_id: str,
     backlog_state_id: str | None,
     event: dict[str, object],
+    dry_run: bool,
 ) -> str:
     start_time = datetime.fromisoformat(str(event["start"])).astimezone(TARGET_TIMEZONE)
     title = build_issue_title(event, start_time)
@@ -367,6 +372,9 @@ def sync_event(
             updates.append("due date")
 
         if updates:
+            if dry_run:
+                return f"{format_date(start_time)}: {title} [dry run: would update {existing_issue['identifier']} {' and '.join(updates)}]"
+
             update_issue_fields(
                 api_key,
                 str(existing_issue["id"]),
@@ -377,6 +385,9 @@ def sync_event(
             )
             return f"{format_date(start_time)}: {title} [updated {existing_issue['identifier']} {' and '.join(updates)}]"
         return f"{format_date(start_time)}: {title} [already existed]"
+
+    if dry_run:
+        return f"{format_date(start_time)}: {title} [dry run: would create {title!r}]"
 
     issue_identifier = create_issue(
         api_key,
@@ -406,9 +417,10 @@ def main() -> None:
         team_id,
         os.environ.get("LINEAR_BACKLOG_STATE_NAME", DEFAULT_BACKLOG_STATE_NAME),
     )
+    dry_run = env_truthy("CONTEST_REMINDER_DRY_RUN")
 
     for event in fetch_events():
-        print(sync_event(api_key, team_id, project_id, backlog_state_id, event))
+        print(sync_event(api_key, team_id, project_id, backlog_state_id, event, dry_run))
 
 
 if __name__ == "__main__":
