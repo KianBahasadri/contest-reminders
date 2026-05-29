@@ -2,7 +2,7 @@ import json
 import os
 import re
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from html import unescape
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -14,6 +14,8 @@ TARGET_TIMEZONE = ZoneInfo("America/New_York")
 USER_AGENT = "Mozilla/5.0"
 DEFAULT_PROJECT_NAME = "Competitions"
 DEFAULT_BACKLOG_STATE_NAME = "Backlog"
+DEFAULT_IN_PROGRESS_STATE_NAME = "In Progress"
+LINEAR_URGENT_PRIORITY = 1
 
 
 def load_dotenv(env_path: Path) -> None:
@@ -108,6 +110,25 @@ def format_date(dt: datetime) -> str:
 
 def format_due_date(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d")
+
+
+def is_today_or_tomorrow(dt: datetime) -> bool:
+    today = datetime.now(TARGET_TIMEZONE).date()
+    return dt.date() in {today, today + timedelta(days=1)}
+
+
+def should_start_issue(issue: dict[str, object]) -> bool:
+    state = issue.get("state") or {}
+    if not isinstance(state, dict):
+        return False
+
+    state_name = str(state.get("name", "")).strip().lower()
+    state_type = str(state.get("type", "")).strip().lower()
+    return state_type in {"backlog", "unstarted"} or state_name in {
+        "backlog",
+        "todo",
+        "to do",
+    }
 
 
 def is_eligible_event(event: dict[str, object]) -> bool:
@@ -250,6 +271,39 @@ def resolve_backlog_state_id(
     return None
 
 
+def resolve_in_progress_state_id(
+    api_key: str, team_id: str, in_progress_state_name: str
+) -> str | None:
+    data = linear_graphql(
+        api_key,
+        """
+        query TeamStates($teamId: String!) {
+          team(id: $teamId) {
+            states {
+              nodes {
+                id
+                name
+                type
+              }
+            }
+          }
+        }
+        """,
+        {"teamId": team_id},
+    )
+    states = data["team"]["states"]["nodes"]
+
+    for state in states:
+        if str(state["name"]).lower() == in_progress_state_name.lower():
+            return str(state["id"])
+
+    for state in states:
+        if state["type"] == "started":
+            return str(state["id"])
+
+    return None
+
+
 def find_issue(api_key: str, title: str, project_id: str) -> dict[str, object] | None:
     data = linear_graphql(
         api_key,
@@ -261,6 +315,11 @@ def find_issue(api_key: str, title: str, project_id: str) -> dict[str, object] |
               identifier
               title
               dueDate
+              state {
+                id
+                name
+                type
+              }
               project {
                 id
               }
@@ -285,12 +344,15 @@ def update_issue_fields(
     *,
     title: str | None = None,
     due_date: str | None = None,
+    state_id: str | None = None,
 ) -> None:
     issue_input: dict[str, object] = {}
     if title is not None:
         issue_input["title"] = title
     if due_date is not None:
         issue_input["dueDate"] = due_date
+    if state_id is not None:
+        issue_input["stateId"] = state_id
     if not issue_input:
         return
 
@@ -324,6 +386,7 @@ def create_issue(
         "title": title,
         "description": description,
         "dueDate": due_date,
+        "priority": LINEAR_URGENT_PRIORITY,
     }
     if backlog_state_id:
         issue_input["stateId"] = backlog_state_id
@@ -355,6 +418,7 @@ def sync_event(
     team_id: str,
     project_id: str,
     backlog_state_id: str | None,
+    in_progress_state_id: str | None,
     event: dict[str, object],
     dry_run: bool,
 ) -> str:
@@ -370,6 +434,14 @@ def sync_event(
             updates.append("title")
         if existing_issue.get("dueDate") != due_date:
             updates.append("due date")
+        state_id = None
+        if (
+            in_progress_state_id
+            and is_today_or_tomorrow(start_time)
+            and should_start_issue(existing_issue)
+        ):
+            updates.append("state")
+            state_id = in_progress_state_id
 
         if updates:
             if dry_run:
@@ -382,6 +454,7 @@ def sync_event(
                 due_date=due_date
                 if existing_issue.get("dueDate") != due_date
                 else None,
+                state_id=state_id,
             )
             return f"{format_date(start_time)}: {title} [updated {existing_issue['identifier']} {' and '.join(updates)}]"
         return f"{format_date(start_time)}: {title} [already existed]"
@@ -389,11 +462,14 @@ def sync_event(
     if dry_run:
         return f"{format_date(start_time)}: {title} [dry run: would create {title!r}]"
 
+    issue_state_id = (
+        in_progress_state_id if is_today_or_tomorrow(start_time) else backlog_state_id
+    )
     issue_identifier = create_issue(
         api_key,
         team_id,
         project_id,
-        backlog_state_id,
+        issue_state_id,
         title,
         build_issue_description(event),
         due_date,
@@ -417,10 +493,29 @@ def main() -> None:
         team_id,
         os.environ.get("LINEAR_BACKLOG_STATE_NAME", DEFAULT_BACKLOG_STATE_NAME),
     )
+    in_progress_state_id = os.environ.get(
+        "LINEAR_IN_PROGRESS_STATE_ID"
+    ) or resolve_in_progress_state_id(
+        api_key,
+        team_id,
+        os.environ.get(
+            "LINEAR_IN_PROGRESS_STATE_NAME", DEFAULT_IN_PROGRESS_STATE_NAME
+        ),
+    )
     dry_run = env_truthy("CONTEST_REMINDER_DRY_RUN")
 
     for event in fetch_events():
-        print(sync_event(api_key, team_id, project_id, backlog_state_id, event, dry_run))
+        print(
+            sync_event(
+                api_key,
+                team_id,
+                project_id,
+                backlog_state_id,
+                in_progress_state_id,
+                event,
+                dry_run,
+            )
+        )
 
 
 if __name__ == "__main__":
