@@ -4,17 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 LOG_FILE="$SCRIPT_DIR/contest-reminders.log"
-FAILED_SCRIPTS=()
-
-declare -A SCRIPT_PATHS=(
-  [ctf]="$SCRIPT_DIR/ctf.py"
-  [codeforces]="$SCRIPT_DIR/codeforces.py"
-  [atcoder]="$SCRIPT_DIR/atcoder.py"
-  [clist_dmoj]="$SCRIPT_DIR/clist_dmoj.py"
-  [dmoj]="$SCRIPT_DIR/dmoj.py"
-)
-
-SCRIPT_ORDER=(ctf codeforces atcoder clist_dmoj dmoj)
+SYNC_FAILED=0
 
 timestamp() {
   date '+%Y-%m-%d %H:%M:%S'
@@ -24,17 +14,16 @@ log_message() {
   printf '[%s] %s\n' "$(timestamp)" "$1" | tee -a "$LOG_FILE"
 }
 
-log_script_output() {
-  local script_name="$1"
-  local output="$2"
+log_output() {
+  local output="$1"
 
   if [[ -z "$output" ]]; then
-    log_message "[$script_name] no changes reported"
+    log_message "No changes reported"
     return
   fi
 
   while IFS= read -r line; do
-    log_message "[$script_name] $line"
+    log_message "$line"
   done <<< "$output"
 }
 
@@ -73,14 +62,6 @@ load_env() {
   done < "$env_file"
 }
 
-script_is_enabled() {
-  local script_name="$1"
-  local enabled_scripts="$CONTEST_REMINDER_SCRIPTS"
-  local normalized=" ${enabled_scripts//,/ } "
-
-  [[ "$normalized" == *" all "* || "$normalized" == *" $script_name "* ]]
-}
-
 require_enabled_scripts() {
   if [[ -n "${CONTEST_REMINDER_SCRIPTS:-}" ]]; then
     return
@@ -97,32 +78,30 @@ dry_run_is_enabled() {
   [[ "$value" == "1" || "$value" == "true" || "$value" == "yes" || "$value" == "on" ]]
 }
 
-run_script() {
-  local script_name="$1"
-  local script_path="$2"
+run_sync() {
   local output
   local status
 
   set +e
-  output="$(python3 "$script_path" 2>&1)"
+  output="$(python3 "$SCRIPT_DIR/main.py" 2>&1)"
   status=$?
   set -e
 
-  log_script_output "$script_name" "$output"
+  log_output "$output"
 
   if (( status != 0 )); then
-    log_message "Run warning: $script_name failed with exit status $status"
-    FAILED_SCRIPTS+=("$script_name")
+    log_message "Run warning: sync failed with exit status $status"
+    SYNC_FAILED=1
   fi
 }
 
 log_summary() {
-  if (( ${#FAILED_SCRIPTS[@]} == 0 )); then
-    log_message "Run finished successfully"
+  if (( SYNC_FAILED != 0 )); then
+    log_message "Run finished with warnings"
     return
   fi
 
-  log_message "Run finished with warnings; failed sources: ${FAILED_SCRIPTS[*]}"
+  log_message "Run finished successfully"
 }
 
 load_env
@@ -132,11 +111,5 @@ require_enabled_scripts
 if dry_run_is_enabled; then
   log_message "Dry run enabled: Linear creates and updates will be previewed only"
 fi
-for script_name in "${SCRIPT_ORDER[@]}"; do
-  if script_is_enabled "$script_name"; then
-    run_script "$script_name" "${SCRIPT_PATHS[$script_name]}"
-  else
-    log_message "[$script_name] skipped"
-  fi
-done
+run_sync
 log_summary
